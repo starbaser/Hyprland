@@ -658,7 +658,7 @@ void CXWM::handleSelectionNotify(xcb_selection_notify_event_t* e) {
     }
 
     if (e->property == XCB_ATOM_NONE) {
-        auto it = std::ranges::find_if(sel->transfers, [](const auto& t) { return !t->propertyReply; });
+        auto it = std::ranges::find_if(sel->transfers, [e](const auto& t) { return t->incomingWindow == e->requestor && !t->propertyReply; });
         if (it != sel->transfers.end()) {
             Log::logger->log(Log::TRACE, "[xwm] converting selection failed");
             sel->transfers.erase(it);
@@ -671,7 +671,7 @@ void CXWM::handleSelectionNotify(xcb_selection_notify_event_t* e) {
 
         setClipboardToWayland(*sel);
     } else if (!sel->transfers.empty())
-        getTransferData(*sel);
+        getTransferData(*sel, e->requestor);
 }
 
 bool CXWM::handleSelectionPropertyNotify(xcb_property_notify_event_t* e) {
@@ -684,7 +684,7 @@ bool CXWM::handleSelectionPropertyNotify(xcb_property_notify_event_t* e) {
 
         if (e->state == XCB_PROPERTY_NEW_VALUE) {
             if (!transfer->incremental) {
-                getTransferData(*sel);
+                getTransferData(*sel, e->window);
                 return true;
             }
 
@@ -693,13 +693,13 @@ bool CXWM::handleSelectionPropertyNotify(xcb_property_notify_event_t* e) {
                 return true;
             }
 
-            int result = sel->onWrite();
+            int result = sel->onWrite(transfer->wlFD.get());
 
             if (result == 1 && !transfer->eventSource) {
                 transfer->eventSource = wl_event_loop_add_fd(g_pCompositor->m_wlEventLoop, transfer->wlFD.get(), WL_EVENT_WRITABLE, ::writeDataSource, sel);
             }
         } else if (e->state == XCB_PROPERTY_DELETE) {
-            getTransferData(*sel);
+            getTransferData(*sel, e->window);
         }
         return true;
     }
@@ -1327,13 +1327,13 @@ void CXWM::setClipboardToWayland(SXSelection& sel) {
 
 static int writeDataSource(int fd, uint32_t mask, void* data) {
     auto selection = sc<SXSelection*>(data);
-    return selection->onWrite();
+    return selection->onWrite(fd);
 }
 
-void CXWM::getTransferData(SXSelection& sel) {
+void CXWM::getTransferData(SXSelection& sel, xcb_window_t window) {
     Log::logger->log(Log::DEBUG, "[xwm] getTransferData");
 
-    auto it = std::ranges::find_if(sel.transfers, [](const auto& t) { return !t->propertyReply; });
+    auto it = std::ranges::find_if(sel.transfers, [window](const auto& t) { return t->incomingWindow == window && !t->propertyReply; });
     if (it == sel.transfers.end()) {
         Log::logger->log(Log::ERR, "[xwm] No pending transfer found");
         return;
@@ -1368,7 +1368,7 @@ void CXWM::getTransferData(SXSelection& sel) {
 
     // Store window ID before onWrite() - transfer may be erased during the call
     const xcb_window_t targetWindow = transfer->incomingWindow;
-    int                writeResult  = sel.onWrite();
+    int                writeResult  = sel.onWrite(transfer->wlFD.get());
 
     if (writeResult != 1)
         return;
@@ -1639,8 +1639,8 @@ bool SXSelection::sendData(xcb_selection_request_event_t* e, std::string mime) {
     return true;
 }
 
-int SXSelection::onWrite() {
-    auto it = std::ranges::find_if(transfers, [](const auto& t) { return t->propertyReply; });
+int SXSelection::onWrite(int fd) {
+    auto it = std::ranges::find_if(transfers, [fd](const auto& t) { return t->wlFD.get() == fd && t->propertyReply; });
     if (it == transfers.end()) {
         Log::logger->log(Log::ERR, "[xwm] No transfer with property data found");
         return 0;
